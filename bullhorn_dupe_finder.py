@@ -1307,8 +1307,7 @@ INDEX_HTML = r"""<!doctype html>
       var html="";
       data.forEach(function(a){
         var cls=a.Id===selectedAdvId?" active":"";
-        html+='<li class="adv-item'+cls+'" data-id="'+a.Id+'">'+esc(a.Company||"(no name)")
-          +'<br><span style="font-size:10px;color:var(--muted)">'+esc(a.BullhornSwimlane||"")+'</span></li>';
+        html+='<li class="adv-item'+cls+'" data-id="'+a.Id+'">'+esc(a.Company||"(no name)")+'</li>';
       });
       $("adv-list").innerHTML=html;
       // attach click handlers
