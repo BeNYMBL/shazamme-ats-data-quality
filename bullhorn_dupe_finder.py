@@ -1293,9 +1293,10 @@ INDEX_HTML = r"""<!doctype html>
 <script>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
-  var selectedAdvId = null;
+  var selectedAdvId = JSON.parse(localStorage.getItem("selectedAdvId")||"null");
   var advResultCache = JSON.parse(localStorage.getItem("advResultCache")||"{}");
   function saveAdvCache(){ localStorage.setItem("advResultCache",JSON.stringify(advResultCache)); }
+  function saveSelectedAdv(id){ selectedAdvId=id; localStorage.setItem("selectedAdvId",JSON.stringify(id)); }
 
   function esc(s){
     return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -1357,7 +1358,7 @@ INDEX_HTML = r"""<!doctype html>
       document.querySelectorAll(".adv-item").forEach(function(li){
         li.addEventListener("click",function(e){
           if(e.target.classList.contains("adv-delete")) return;
-          selectedAdvId=parseInt(this.getAttribute("data-id"));
+          saveSelectedAdv(parseInt(this.getAttribute("data-id")));
           document.querySelectorAll(".adv-item").forEach(function(el){el.classList.remove("active")});
           this.classList.add("active");
           loadAdvDetail(selectedAdvId);
@@ -1374,7 +1375,7 @@ INDEX_HTML = r"""<!doctype html>
           .then(function(data){
             if(data.error){alert(data.error);return;}
             if(selectedAdvId===id){
-              selectedAdvId=null;
+              saveSelectedAdv(null);
               $("right-panel").innerHTML='<div class="placeholder">Select an advertiser from the list to view details.</div>';
             }
             loadAdvList();
@@ -1935,6 +1936,11 @@ INDEX_HTML = r"""<!doctype html>
   if(reportData.length > 0 && reportDateSaved){
     $("view-report-date").textContent = reportDateSaved;
     $("view-report-btn").style.display = "inline-block";
+  }
+
+  // Restore last selected advertiser on page load
+  if(selectedAdvId){
+    loadAdvDetail(selectedAdvId);
   }
 })();
 </script>
