@@ -1294,6 +1294,7 @@ INDEX_HTML = r"""<!doctype html>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
   var selectedAdvId = null;
+  var advResultCache = {};  // advertiserId -> last duplicate report result
 
   function esc(s){
     return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -1419,6 +1420,8 @@ INDEX_HTML = r"""<!doctype html>
         +'<option value="either">Email or name</option></select></div>';
       html+='<div><label for="f-count">Page size</label><input id="f-count" type="number" min="1" max="500" value="500"></div>';
       html+='<div><button class="action primary" id="find-btn">Find Duplicates</button></div>';
+      var hasCache = !!advResultCache[id];
+      html+='<div>'+(hasCache?'<button class="action" id="view-adv-report-btn">View Report</button>':'')+'</div>';
       html+='</div>';
       html+='<div id="find-status"></div>';
       html+='<div id="results"></div>';
@@ -1434,6 +1437,15 @@ INDEX_HTML = r"""<!doctype html>
       $("find-btn").addEventListener("click",function(){
         doFindDuplicates(id);
       });
+
+      // View cached report handler
+      var viewBtn=$("view-adv-report-btn");
+      if(viewBtn){
+        viewBtn.addEventListener("click",function(){
+          $("find-status").innerHTML="";
+          renderResults(advResultCache[id]);
+        });
+      }
     });
   }
 
@@ -1496,7 +1508,21 @@ INDEX_HTML = r"""<!doctype html>
         .then(function(result){
           if(result.error){$("find-status").innerHTML='<div class="msg err">'+esc(result.error)+'</div>';return;}
           $("find-status").innerHTML="";
+          advResultCache[advId]=result;
           renderResults(result);
+          // Show "View Report" button if not already present
+          if(!$("view-adv-report-btn")){
+            var findForm=document.querySelector(".find-form");
+            if(findForm){
+              var d=document.createElement("div");
+              d.innerHTML='<button class="action" id="view-adv-report-btn">View Report</button>';
+              findForm.appendChild(d);
+              $("view-adv-report-btn").addEventListener("click",function(){
+                $("find-status").innerHTML="";
+                renderResults(advResultCache[advId]);
+              });
+            }
+          }
         });
     })
     .catch(function(e){
