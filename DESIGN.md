@@ -1,7 +1,7 @@
 # Shazamme Data Quality Tool — Design Document
 
 **Created:** 2026-07-16
-**Status:** v2 — Multi-database (MSSQL read-only + PostgreSQL)
+**Status:** v3 — Run All Report + Candidate Detail Slide-out
 
 ---
 
@@ -119,7 +119,14 @@ ORDER BY a.Company
 | `CheckedOn` | TIMESTAMP | When the check was run |
 | **UNIQUE** | `(AdvertiserId, BullhornCandidateID)` | Prevents re-inserting same candidate per advertiser |
 
-**Shazamme verification logic**: Checks MSSQL `dbo.Candidate.BullhornCandidateID` first; falls back to `dbo.Candidate.EMail` if BH ID not found. If neither matches, `ExistsInShazamme = FALSE` (false alarm — candidate was not posted by Shazamme).
+**Shazamme verification logic** (updated 2026-07-17): A candidate is considered "exists in Shazamme" only if **both** `EMail` AND `BullhornCandidateID` match a record in `dbo.Candidate`. The previous approach (check BullhornCandidateID first, fallback to email alone) produced false positives — a candidate's email could match a record from a different advertiser. The combined check eliminates this.
+
+```sql
+SELECT COUNT(1) FROM dbo.Candidate c
+WHERE c.EMail = {email} AND c.BullhornCandidateID = {bullhorncandidateid}
+```
+
+If either email or BullhornCandidateID is missing from the Bullhorn record, `ExistsInShazamme = FALSE`.
 
 **`_migrations` table** — tracks applied migration scripts.
 
@@ -159,40 +166,107 @@ ORDER BY a.Company
 3. Token is automatically refreshed (Flow 3) before the search.
 4. Server uses the refreshed `BullhornRestURL` and `BullhornSessionToken` to call the Bullhorn REST API.
 5. Duplicate detection runs using the union-find algorithm.
-6. **Shazamme verification**: each duplicate candidate is looked up in MSSQL `dbo.Candidate` by `BullhornCandidateID` (fallback: `EMail`) to check if it was created by Shazamme.
+6. **Shazamme verification**: each duplicate candidate is looked up in MSSQL `dbo.Candidate` using both `EMail` AND `BullhornCandidateID` to confirm it was created by Shazamme.
 7. Duplicate candidates are saved to PostgreSQL `Candidate` table with the `ExistsInShazamme` flag.
 8. Results display with a "In Shazamme" column: **Yes** (confirmed from Shazamme), **No (false alarm)** (not from Shazamme), or **N/A**.
 9. CSV export includes the `exists_in_shazamme` column.
 
+### Flow 5: Run All Report (all advertisers, streamed)
+
+1. User selects a date and match mode in the **Run All Report** bar, then clicks the button.
+2. The UI switches to a full-width **Report View** with a progress bar and live feed.
+3. Server streams NDJSON (newline-delimited JSON) — one event per line:
+   - `{"type":"progress", "current":1, "total":12, "company":"Skillhouse"}` — progress update
+   - `{"type":"result", "advertiserId":2, "company":"Skillhouse", ...}` — advertiser result with duplicate data
+   - `{"type":"error", "advertiserId":5, "company":"BrokenCo", "error":"..."}` — if token refresh or API call fails
+   - `{"type":"complete"}` — stream is done
+4. For each advertiser the server: refreshes the Bullhorn token → fetches candidates → runs duplicate detection → verifies against Shazamme → streams the result.
+5. Failed advertisers are logged and skipped; the report continues with the next advertiser.
+6. After all advertisers are processed, the UI shows:
+   - **Summary stats**: total checked, with duplicates, clean, failed
+   - **Advertiser table**: sortable rows with expand/collapse for duplicate details
+   - **Export CSV**: single download covering all advertisers
+7. User clicks "Back to Advertisers" to return to the normal management view.
+
+### Flow 6: Candidate Detail (on-demand from Bullhorn)
+
+1. In any duplicate results view (per-advertiser or Run All Report), user clicks a candidate row.
+2. A **slide-out panel** opens from the right with a loading indicator.
+3. Server calls `GET {restUrl}/entity/Candidate/{id}?fields=...` to fetch full candidate details.
+4. Panel displays: contact info (email, phone, mobile), location (address), professional details (occupation, skills, employment preference, education), source & ownership (source, owner, dateAdded, dateLastModified), and status.
+5. User can click another candidate in the same duplicate set to compare — the panel refreshes in place.
+6. Click the X button or the overlay to close.
+
+**Why on-demand**: Fetching 20+ fields for every candidate during the bulk report would slow pagination significantly. Instead, minimal fields are fetched during the report, and full details are loaded only when the user clicks to investigate.
+
 ---
 
-## UI Layout (v2)
+## UI Layout (v3)
+
+The UI has two views that swap in place:
+
+### Main View (advertiser management)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │  Header: Shazamme Data Quality Tool                             │
 ├─────────────────────────────────────────────────────────────────┤
 │  TOP PANEL: [Add Advertiser ▼ dropdown]  [Add button]           │
+├─────────────────────────────────────────────────────────────────┤
+│  RUN ALL BAR: [Date] [Match on ▼]  [Run All Report]             │
 ├────────────────────┬────────────────────────────────────────────┤
 │  LEFT PANEL        │  RIGHT PANEL                               │
-│                    │                                            │
-│  Advertiser list   │  Selected advertiser details               │
-│  (from PostgreSQL) │  - AdvertiserID                            │
-│                    │  - Company                                 │
-│  > Company A  ◄──  │  - BullhornClientID                       │
-│    Company B       │  - BullhornClientSecret                    │
-│    Company C       │  - BullhornAPIUsername                     │
-│    Company D       │  - BullhornAPIPassword                     │
-│    ...             │  - BullhornSessionToken                    │
-│                    │  - BullhornCorpToken                       │
-│                    │  - BullhornSwimlane                        │
-│                    │  - BullhornRestURL                         │
-│                    ├────────────────────────────────────────────┤
-│                    │  Duplicate Finder                           │
-│                    │  [Date] [Match on ▼] [Page size] [Find]    │
-│                    │                                            │
-│                    │  Results / stats / clusters                 │
+│  Advertiser list   │  Selected advertiser details + Find Dupes  │
 └────────────────────┴────────────────────────────────────────────┘
+```
+
+### Report View (full-width, replaces main view)
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  [← Back]    Duplicate Report — 2026-07-17        [Export CSV]  │
+├─────────────────────────────────────────────────────────────────┤
+│  ████████████████░░░░░░░  75%  Processing 9 of 12: Acme Corp   │
+│  ✓ Skillhouse — 150 candidates, 3 duplicate sets                │
+│  ✓ TechHire — 80 candidates, 0 duplicate sets                   │
+│  ✗ BrokenCo — Failed: token refresh error                       │
+├─────────────────────────────────────────────────────────────────┤
+│  ┌──────┐ ┌──────┐ ┌──────┐ ┌───────┐                          │
+│  │  12  │ │   3  │ │   8  │ │   1   │                          │
+│  │Checked│ │w/Dups│ │Clean │ │Failed │                          │
+│  └──────┘ └──────┘ └──────┘ └───────┘                          │
+├─────────────────────────────────────────────────────────────────┤
+│  Advertiser      │ Candidates │ Dup Sets │ Dup Recs │ Status    │
+│  ▼ Skillhouse    │    150     │    3     │    7     │ 3 sets    │
+│    ┌─ Set 1: hafizh.adip@gmail.com ─────────────────────────┐  │
+│    │ Hafizh Prasetya   2444591  ← clickable → slide-out     │  │
+│    │ Hafizh Adi P.     2444724                              │  │
+│    └────────────────────────────────────────────────────────┘  │
+│  ► Acme Corp     │     80     │    0     │    0     │ Clean     │
+│  ⚠ BrokenCo      │     —      │    —     │    —     │ Failed    │
+└─────────────────────────────────────────────────────────────────┘
+
+Slide-out panel (on candidate click):
+┌───────────────────────┐
+│  × Close              │
+│  Hafizh Adi Prasetya  │
+│  Bullhorn ID: 2444724 │
+│                       │
+│  CONTACT              │
+│  Email / Phone / etc  │
+│                       │
+│  LOCATION             │
+│  Address              │
+│                       │
+│  PROFESSIONAL         │
+│  Occupation / Skills  │
+│                       │
+│  SOURCE & OWNERSHIP   │
+│  Source / Owner / Date │
+│                       │
+│  STATUS               │
+│  Status               │
+└───────────────────────┘
 ```
 
 ### Panel Details
@@ -216,7 +290,7 @@ ORDER BY a.Company
 
 ---
 
-## API Endpoints (v2)
+## API Endpoints (v3)
 
 | Method | Path | Description |
 |--------|------|-------------|
@@ -225,7 +299,10 @@ ORDER BY a.Company
 | `GET` | `/api/advertisers` | List all advertisers from PostgreSQL (for left panel) |
 | `POST` | `/api/advertisers` | Add an advertiser (copy from MSSQL to PostgreSQL) |
 | `GET` | `/api/advertisers/<id>` | Get single advertiser details from PostgreSQL |
-| `POST` | `/api/find` | Run duplicate report (uses selected advertiser's credentials) |
+| `POST` | `/api/advertisers/<id>/refresh-token` | Refresh Bullhorn OAuth token for an advertiser |
+| `POST` | `/api/find` | Run duplicate report for a single advertiser |
+| `POST` | `/api/report/all` | **NEW** — Run duplicate report across all advertisers (streams NDJSON) |
+| `GET` | `/api/candidate/<id>?advertiserId=<id>` | **NEW** — Fetch full candidate details from Bullhorn entity API |
 
 ### GET /api/mssql/advertisers
 
@@ -280,6 +357,30 @@ Same as v1, but `restUrl` and `token` can be omitted if `advertiserId` is provid
   "count": 500
 }
 ```
+
+### POST /api/report/all
+
+Runs the duplicate report across **all** advertisers in PostgreSQL. Streams results as NDJSON (one JSON object per line). For each advertiser: refreshes the Bullhorn token, fetches candidates, detects duplicates, verifies against Shazamme.
+
+**Request body:**
+```json
+{ "date": "2026-07-17", "matchOn": "email" }
+```
+
+**Streamed response** (Content-Type: `application/x-ndjson`):
+```
+{"type":"progress","current":1,"total":12,"company":"Skillhouse"}
+{"type":"result","advertiserId":2,"company":"Skillhouse","totalFetched":150,"duplicateGroups":3,...}
+{"type":"progress","current":2,"total":12,"company":"Acme Corp"}
+{"type":"error","advertiserId":5,"company":"BrokenCo","error":"token refresh failed"}
+{"type":"complete"}
+```
+
+### GET /api/candidate/\<id\>?advertiserId=\<id\>
+
+Fetches full candidate details from the Bullhorn entity API on demand. Uses the advertiser's stored REST URL and session token.
+
+**Fields returned:** id, firstName, lastName, name, email, email2, phone, mobile, address (flattened), occupation, employmentPreference, educationDegree, source, owner (flattened), status, dateAdded, dateLastModified.
 
 ---
 
@@ -404,11 +505,22 @@ Check duplicates/
 
 ---
 
+## Changelog
+
+### v3 (2026-07-18)
+- **Run All Report**: one-click duplicate report across all advertisers with streaming progress bar and live feed
+- **Candidate Detail Slide-out**: click any candidate row to see full Bullhorn details (contact, location, professional, source, status) in a slide-out panel
+- **Shazamme check fix**: verification now requires BOTH email AND BullhornCandidateID to match (was producing false positives with single-field matching)
+- **New endpoints**: `POST /api/report/all` (streaming NDJSON), `GET /api/candidate/<id>` (on-demand detail)
+
+### v2 (2026-07-16)
+- Multi-database architecture (MSSQL read-only + PostgreSQL)
+- Advertiser management, Bullhorn token refresh, Shazamme verification
+
 ## Planned Enhancements
 
+- [ ] **Scheduled reports** — run the "Run All" report on a cron schedule and email/store results
 - [ ] **Date range support** — search across multiple days, not just one
 - [ ] **Fuzzy name matching** — catch near-duplicates like "Jon" / "John"
 - [ ] **Bulk actions** — mark/merge duplicates directly from the UI
-- [ ] **Auto-refresh Bullhorn tokens** — use stored OAuth credentials to refresh expired session tokens
-- [ ] **Scheduled reports** — run duplicate checks on a schedule and notify the user
 - [ ] _(add more here)_

@@ -52,6 +52,11 @@ _ENV = dotenv_values(os.path.join(_SCRIPT_DIR, ".env"))
 DEFAULT_PORT = 8000
 # Fields we ask Bullhorn to return for each candidate.
 FIELDS = "id,firstName,lastName,name,email,dateAdded"
+CANDIDATE_DETAIL_FIELDS = (
+    "id,firstName,lastName,name,email,email2,phone,mobile,address,"
+    "occupation,employmentPreference,educationDegree,"
+    "source,owner,status,dateAdded,dateLastModified"
+)
 
 
 # --------------------------------------------------------------------------- #
@@ -663,6 +668,49 @@ def run_report(params: dict) -> dict:
 
 
 # --------------------------------------------------------------------------- #
+#  Single candidate detail (on-demand from Bullhorn entity API)
+# --------------------------------------------------------------------------- #
+def fetch_candidate_detail(rest_url: str, token: str, candidate_id: int) -> dict:
+    """Fetch full candidate details from Bullhorn entity API."""
+    base = _normalize_base_url(rest_url)
+    params = urllib.parse.urlencode({
+        "fields": CANDIDATE_DETAIL_FIELDS,
+        "BhRestToken": token.strip(),
+    })
+    url = f"{base}entity/Candidate/{candidate_id}?{params}"
+    req = urllib.request.Request(url, headers={"Accept": "application/json"})
+    with urllib.request.urlopen(req, timeout=30) as resp:
+        payload = json.loads(resp.read().decode("utf-8"))
+    data = payload.get("data", payload)
+
+    # Flatten nested objects for the UI
+    addr = data.get("address") or {}
+    if isinstance(addr, dict):
+        data["_address"] = ", ".join(
+            p for p in [
+                addr.get("address1", ""), addr.get("city", ""),
+                addr.get("state", ""), addr.get("zip", ""),
+                addr.get("countryName", ""),
+            ] if p
+        )
+    owner = data.get("owner") or {}
+    if isinstance(owner, dict):
+        data["_owner"] = " ".join(
+            p for p in [owner.get("firstName", ""), owner.get("lastName", "")] if p
+        )
+
+    # Convert epoch timestamps to readable strings
+    for ts_field in ("dateAdded", "dateLastModified"):
+        val = data.get(ts_field)
+        if isinstance(val, (int, float)) and val > 0:
+            data[ts_field + "_fmt"] = datetime.fromtimestamp(val / 1000).strftime(
+                "%Y-%m-%d %H:%M:%S"
+            )
+
+    return data
+
+
+# --------------------------------------------------------------------------- #
 #  HTTP server
 # --------------------------------------------------------------------------- #
 class Handler(BaseHTTPRequestHandler):
@@ -709,6 +757,23 @@ class Handler(BaseHTTPRequestHandler):
                     self._json_err("Advertiser not found.")
             except Exception as e:
                 self._json_err(f"Error: {e}")
+        elif re.match(r"^/api/candidate/\d+$", path):
+            candidate_id = int(path.split("/")[-1])
+            qs = parse_qs(urlparse(self.path).query)
+            adv_id = int(qs.get("advertiserId", [0])[0])
+            try:
+                adv = get_pg_advertiser(adv_id)
+                if not adv:
+                    self._json_err("Advertiser not found.")
+                    return
+                detail = fetch_candidate_detail(
+                    adv.get("BullhornRestURL", ""),
+                    adv.get("BullhornSessionToken", ""),
+                    candidate_id,
+                )
+                self._json_ok(detail)
+            except Exception as e:
+                self._json_err(f"Error fetching candidate: {e}")
         else:
             self._send(404, "Not found", "text/plain; charset=utf-8")
 
@@ -746,6 +811,61 @@ class Handler(BaseHTTPRequestHandler):
                     params.setdefault("token", adv.get("BullhornSessionToken", ""))
                 result = run_report(params)
                 self._json_ok(result)
+
+            elif path == "/api/report/all":
+                params = self._read_body()
+                date_str = params.get("date", "")
+                match_on = params.get("matchOn", "email")
+                if not date_str:
+                    self._json_err("Date is required.")
+                    return
+
+                # Stream NDJSON — one JSON object per line
+                self.send_response(200)
+                self.send_header("Content-Type", "application/x-ndjson")
+                self.send_header("Cache-Control", "no-cache")
+                self.send_header("X-Content-Type-Options", "nosniff")
+                self.end_headers()
+
+                advertisers = list_pg_advertisers()
+                total = len(advertisers)
+
+                for i, adv_row in enumerate(advertisers):
+                    aid = adv_row["Id"]
+                    company = adv_row.get("Company", "")
+
+                    # progress event
+                    self.wfile.write((json.dumps({
+                        "type": "progress", "current": i + 1,
+                        "total": total, "company": company,
+                    }) + "\n").encode("utf-8"))
+                    self.wfile.flush()
+
+                    try:
+                        refresh_bullhorn_token(aid)
+                        adv_detail = get_pg_advertiser(aid)
+                        result = run_report({
+                            "advertiserId": aid,
+                            "restUrl": adv_detail.get("BullhornRestURL", ""),
+                            "token": adv_detail.get("BullhornSessionToken", ""),
+                            "date": date_str,
+                            "matchOn": match_on,
+                        })
+                        self.wfile.write((json.dumps({
+                            "type": "result", "advertiserId": aid,
+                            "company": company, **result,
+                        }) + "\n").encode("utf-8"))
+                        self.wfile.flush()
+                    except Exception as exc:
+                        self.wfile.write((json.dumps({
+                            "type": "error", "advertiserId": aid,
+                            "company": company, "error": str(exc),
+                        }) + "\n").encode("utf-8"))
+                        self.wfile.flush()
+
+                self.wfile.write((json.dumps({"type": "complete"}) + "\n").encode("utf-8"))
+                self.wfile.flush()
+                return  # already sent response, skip normal error handling
 
             else:
                 self._send(404, "Not found", "text/plain; charset=utf-8")
@@ -933,6 +1053,115 @@ INDEX_HTML = r"""<!doctype html>
 
   footer{margin-top:24px; font-size:11px; color:var(--muted)}
   footer code{font-family:var(--mono); background:var(--chip); padding:1px 4px; border-radius:4px}
+
+  /* ---------- Run-All Report bar ---------- */
+  .run-all-bar{
+    display:flex; align-items:flex-end; gap:12px; margin-bottom:16px;
+  }
+  .run-all-bar .field{flex:0 0 auto}
+  .run-all-bar button{
+    background:var(--accent); color:#fff; border:0; border-radius:8px;
+    padding:9px 18px; font-size:13px; font-weight:600; cursor:pointer;
+    font-family:var(--sans); white-space:nowrap;
+  }
+  .run-all-bar button:hover{background:#0b5f58}
+  .run-all-bar button:disabled{opacity:.55;cursor:progress}
+
+  /* ---------- Report view ---------- */
+  .report-header{
+    display:flex; align-items:center; gap:16px; margin-bottom:20px; flex-wrap:wrap;
+  }
+  .report-header h2{margin:0; font-size:20px; flex:1}
+  .btn-back{
+    background:#fff; border:1px solid var(--line); border-radius:8px;
+    padding:8px 14px; font-size:12px; font-weight:600; cursor:pointer;
+    font-family:var(--sans); color:#33414f;
+  }
+  .btn-back:hover{border-color:var(--accent); color:var(--accent)}
+
+  /* Progress */
+  .progress-section{margin-bottom:20px}
+  .progress-bar-outer{
+    width:100%; height:22px; background:#eef2f5; border-radius:11px;
+    overflow:hidden; border:1px solid var(--line);
+  }
+  .progress-bar-fill{
+    height:100%; background:linear-gradient(90deg,#0f766e,#14b8a6);
+    border-radius:11px; transition:width .4s ease; width:0%;
+  }
+  .progress-text{font-size:12px; color:var(--muted); margin-top:6px; font-family:var(--mono)}
+  .progress-feed{margin-top:12px; max-height:180px; overflow-y:auto}
+  .feed-item{
+    font-size:12px; padding:4px 0; border-bottom:1px solid #f0f2f4;
+    display:flex; align-items:center; gap:8px;
+  }
+  .feed-icon{font-size:14px; flex-shrink:0; width:18px; text-align:center}
+  .feed-icon.ok{color:var(--accent)}
+  .feed-icon.err{color:var(--danger)}
+  .feed-icon.dup{color:var(--warn)}
+
+  /* Report table */
+  .report-table{width:100%; border-collapse:collapse; margin-top:16px}
+  .report-table th{
+    text-align:left; font-size:10px; text-transform:uppercase; letter-spacing:.07em;
+    color:var(--muted); padding:8px 12px; border-bottom:2px solid var(--line); font-weight:600;
+  }
+  .report-table td{padding:10px 12px; border-bottom:1px solid #eef2f5; font-size:13px}
+  .report-table tr.adv-row{cursor:pointer; transition:background .1s}
+  .report-table tr.adv-row:hover{background:var(--accent-soft)}
+  .report-table tr.adv-row td:first-child{font-weight:600}
+  .adv-expand-icon{
+    display:inline-block; width:16px; font-size:10px; color:var(--muted);
+    transition:transform .2s; margin-right:4px;
+  }
+  .adv-expand-icon.open{transform:rotate(90deg)}
+  .adv-detail-row{display:none}
+  .adv-detail-row.open{display:table-row}
+  .adv-detail-cell{padding:0 12px 12px 36px; background:#fafbfc}
+  .badge-clean{
+    font-size:10px; font-weight:600; padding:2px 8px; border-radius:12px;
+    background:#e6f7ed; color:#15803d; border:1px solid #bbf7d0;
+  }
+  .badge-dup{
+    font-size:10px; font-weight:600; padding:2px 8px; border-radius:12px;
+    background:#fef2f1; color:var(--danger); border:1px solid #f4c7c1;
+  }
+  .badge-fail{
+    font-size:10px; font-weight:600; padding:2px 8px; border-radius:12px;
+    background:#fff7ed; color:var(--warn); border:1px solid #fed7aa;
+  }
+
+  /* Slide-out candidate detail */
+  .slide-overlay{
+    position:fixed; inset:0; background:rgba(16,21,28,.3);
+    z-index:100; display:none; opacity:0; transition:opacity .2s;
+  }
+  .slide-overlay.open{display:block; opacity:1}
+  .slide-panel{
+    position:fixed; top:0; right:-480px; width:460px; height:100vh;
+    background:var(--panel); box-shadow:-4px 0 24px rgba(16,21,28,.12);
+    z-index:101; overflow-y:auto; padding:24px;
+    transition:right .3s ease;
+  }
+  .slide-panel.open{right:0}
+  .slide-close{
+    position:absolute; top:16px; right:16px; background:none; border:0;
+    font-size:20px; cursor:pointer; color:var(--muted); padding:4px 8px;
+  }
+  .slide-close:hover{color:var(--ink)}
+  .slide-panel h3{margin:0 0 16px; font-size:18px}
+  .detail-section{margin-bottom:18px}
+  .detail-section h4{
+    font-size:10px; text-transform:uppercase; letter-spacing:.08em;
+    color:var(--muted); margin:0 0 8px; font-weight:600;
+  }
+  .detail-row{
+    display:flex; justify-content:space-between; padding:5px 0;
+    font-size:12px; border-bottom:1px solid #f0f2f4;
+  }
+  .detail-row .dl{color:var(--muted); flex-shrink:0; width:110px}
+  .detail-row .dv{font-family:var(--mono); word-break:break-all; text-align:right; flex:1}
+  .slide-loading{text-align:center; padding:40px; color:var(--muted); font-size:13px}
 </style>
 </head>
 <body>
@@ -943,35 +1172,84 @@ INDEX_HTML = r"""<!doctype html>
     <p class="sub">Add advertisers from Shazamme, refresh Bullhorn tokens, and find duplicate candidates by email or name.</p>
   </header>
 
-  <!-- TOP PANEL: Add Advertiser -->
-  <div class="card top-panel">
-    <div class="field">
-      <label for="mssql-dropdown">Add Advertiser from Shazamme</label>
-      <select id="mssql-dropdown"><option value="">Loading advertisers...</option></select>
+  <!-- ====== MAIN VIEW (advertiser management) ====== -->
+  <div id="main-view">
+    <!-- TOP PANEL: Add Advertiser -->
+    <div class="card top-panel">
+      <div class="field">
+        <label for="mssql-dropdown">Add Advertiser from Shazamme</label>
+        <select id="mssql-dropdown"><option value="">Loading advertisers...</option></select>
+      </div>
+      <button id="add-btn" disabled>Add</button>
     </div>
-    <button id="add-btn" disabled>Add</button>
+    <div id="top-status"></div>
+
+    <!-- RUN ALL REPORT BAR -->
+    <div class="card run-all-bar">
+      <div class="field">
+        <label for="ra-date">Date</label>
+        <input id="ra-date" type="date">
+      </div>
+      <div class="field">
+        <label for="ra-match">Match on</label>
+        <select id="ra-match">
+          <option value="email" selected>Email</option>
+          <option value="name">Full name</option>
+          <option value="either">Email or name</option>
+        </select>
+      </div>
+      <button id="run-all-btn">Run All Report</button>
+    </div>
+
+    <!-- MAIN LAYOUT -->
+    <div class="main-layout">
+      <!-- LEFT PANEL: Advertiser list -->
+      <div class="card left-panel">
+        <h3>Advertisers</h3>
+        <ul class="adv-list" id="adv-list">
+          <li class="empty-msg">No advertisers added yet.</li>
+        </ul>
+      </div>
+
+      <!-- RIGHT PANEL -->
+      <div class="card right-panel" id="right-panel">
+        <div class="placeholder">Select an advertiser from the list to view details.</div>
+      </div>
+    </div>
+
+    <footer>
+      Timezone note: the <code>dateAdded</code> day window resolves against Bullhorn's configured timezone.
+    </footer>
   </div>
-  <div id="top-status"></div>
 
-  <!-- MAIN LAYOUT -->
-  <div class="main-layout">
-    <!-- LEFT PANEL: Advertiser list -->
-    <div class="card left-panel">
-      <h3>Advertisers</h3>
-      <ul class="adv-list" id="adv-list">
-        <li class="empty-msg">No advertisers added yet.</li>
-      </ul>
+  <!-- ====== REPORT VIEW (full-width, hidden by default) ====== -->
+  <div id="report-view" style="display:none">
+    <div class="report-header">
+      <button class="btn-back" id="back-btn">&larr; Back to Advertisers</button>
+      <h2>Duplicate Report &mdash; <span id="report-date-label"></span></h2>
+      <button class="action" id="export-all-csv" style="display:none">Export CSV</button>
     </div>
 
-    <!-- RIGHT PANEL -->
-    <div class="card right-panel" id="right-panel">
-      <div class="placeholder">Select an advertiser from the list to view details.</div>
+    <!-- Progress -->
+    <div class="card progress-section" id="progress-section">
+      <div class="progress-bar-outer"><div class="progress-bar-fill" id="progress-fill"></div></div>
+      <div class="progress-text" id="progress-text">Preparing...</div>
+      <div class="progress-feed" id="progress-feed"></div>
     </div>
+
+    <!-- Summary stats (shown after completion) -->
+    <div class="summary" id="report-summary" style="display:none"></div>
+
+    <!-- Advertiser results table -->
+    <div id="report-results"></div>
   </div>
+</div>
 
-  <footer>
-    Timezone note: the <code>dateAdded</code> day window resolves against Bullhorn's configured timezone.
-  </footer>
+<!-- Slide-out candidate detail panel -->
+<div class="slide-overlay" id="slide-overlay"></div>
+<div class="slide-panel" id="slide-panel">
+  <button class="slide-close" id="slide-close">&times;</button>
+  <div id="slide-content"><div class="slide-loading">Select a candidate to view details.</div></div>
 </div>
 
 <script>
@@ -1237,6 +1515,305 @@ INDEX_HTML = r"""<!doctype html>
       URL.revokeObjectURL(a.href);
     });}
   }
+
+  // ==================================================================
+  //  Run All Report — streaming, progress, expandable table, slide-out
+  // ==================================================================
+  var reportData = [];  // collected results from streaming
+
+  function switchView(view){
+    $("main-view").style.display = view==="main"?"block":"none";
+    $("report-view").style.display = view==="report"?"block":"none";
+  }
+
+  // ---- Back button ----
+  $("back-btn").addEventListener("click",function(){ switchView("main"); });
+
+  // ---- Set default date on the run-all bar ----
+  $("ra-date").value = todayISO();
+
+  // ---- Run All Report button ----
+  $("run-all-btn").addEventListener("click", function(){
+    var date = $("ra-date").value;
+    if(!date){ alert("Please select a date."); return; }
+    switchView("report");
+    $("report-date-label").textContent = date;
+    $("export-all-csv").style.display = "none";
+    $("report-summary").style.display = "none";
+    $("report-results").innerHTML = "";
+    $("progress-section").style.display = "block";
+    $("progress-fill").style.width = "0%";
+    $("progress-text").textContent = "Preparing...";
+    $("progress-feed").innerHTML = "";
+    reportData = [];
+
+    var matchOn = $("ra-match").value;
+    $("run-all-btn").disabled = true;
+
+    fetch("/api/report/all",{
+      method:"POST",
+      headers:{"Content-Type":"application/json"},
+      body:JSON.stringify({date:date, matchOn:matchOn})
+    }).then(function(response){
+      var reader = response.body.getReader();
+      var decoder = new TextDecoder();
+      var buffer = "";
+
+      function pump(){
+        return reader.read().then(function(result){
+          if(result.done){
+            // process any remaining buffer
+            if(buffer.trim()) processLine(buffer.trim());
+            onStreamComplete();
+            return;
+          }
+          buffer += decoder.decode(result.value, {stream:true});
+          var lines = buffer.split("\n");
+          buffer = lines.pop(); // keep incomplete last line in buffer
+          lines.forEach(function(line){
+            if(line.trim()) processLine(line.trim());
+          });
+          return pump();
+        });
+      }
+      return pump();
+    }).catch(function(e){
+      $("progress-text").textContent = "Error: " + e.message;
+    }).finally(function(){
+      $("run-all-btn").disabled = false;
+    });
+  });
+
+  function processLine(line){
+    var evt;
+    try{ evt = JSON.parse(line); } catch(e){ return; }
+
+    if(evt.type === "progress"){
+      var pct = Math.round((evt.current / evt.total) * 100);
+      $("progress-fill").style.width = pct + "%";
+      $("progress-text").textContent = "Processing " + evt.current + " of " + evt.total + ": " + evt.company + "...";
+    }
+    else if(evt.type === "result"){
+      reportData.push(evt);
+      var icon, cls;
+      if(evt.duplicateGroups > 0){
+        icon = "!!"; cls = "dup";
+      } else {
+        icon = "\u2713"; cls = "ok";
+      }
+      $("progress-feed").innerHTML += '<div class="feed-item"><span class="feed-icon '+cls+'">'+icon+'</span>'
+        + esc(evt.company) + ' &mdash; ' + evt.totalFetched + ' candidates, '
+        + evt.duplicateGroups + ' duplicate set' + (evt.duplicateGroups===1?"":"s") + '</div>';
+      $("progress-feed").scrollTop = $("progress-feed").scrollHeight;
+    }
+    else if(evt.type === "error"){
+      reportData.push(evt);
+      $("progress-feed").innerHTML += '<div class="feed-item"><span class="feed-icon err">\u2717</span>'
+        + esc(evt.company) + ' &mdash; Failed: ' + esc(evt.error).substring(0,80) + '</div>';
+      $("progress-feed").scrollTop = $("progress-feed").scrollHeight;
+    }
+  }
+
+  function onStreamComplete(){
+    $("progress-fill").style.width = "100%";
+    $("progress-text").textContent = "Complete.";
+
+    // Compute summary stats
+    var totalChecked=0, withDups=0, cleanCount=0, failedCount=0;
+    reportData.forEach(function(r){
+      totalChecked++;
+      if(r.type==="error"){ failedCount++; }
+      else if(r.duplicateGroups>0){ withDups++; }
+      else { cleanCount++; }
+    });
+
+    var sh = $("report-summary");
+    sh.innerHTML = '<div class="stat"><div class="n">'+totalChecked+'</div><div class="l">Checked</div></div>'
+      +'<div class="stat '+(withDups?'flag':'clean')+'"><div class="n">'+withDups+'</div><div class="l">With Duplicates</div></div>'
+      +'<div class="stat clean"><div class="n">'+cleanCount+'</div><div class="l">Clean</div></div>'
+      +'<div class="stat '+(failedCount?'flag':'')+'"><div class="n">'+failedCount+'</div><div class="l">Failed</div></div>';
+    sh.style.display = "grid";
+
+    // Show export button
+    if(reportData.length > 0) $("export-all-csv").style.display = "inline-block";
+
+    // Build the advertiser results table
+    renderReportTable();
+  }
+
+  function renderReportTable(){
+    var html = '<table class="report-table"><thead><tr>'
+      +'<th>Advertiser</th><th>Swimlane</th><th>Candidates</th><th>Dup Sets</th><th>Dup Records</th><th>Status</th>'
+      +'</tr></thead><tbody>';
+
+    reportData.forEach(function(r, idx){
+      if(r.type==="error"){
+        html+='<tr class="adv-row"><td>'+esc(r.company)+'</td><td>—</td><td>—</td><td>—</td><td>—</td>'
+          +'<td><span class="badge-fail" title="'+esc(r.error)+'">Failed</span></td></tr>';
+        return;
+      }
+      var hasDups = r.duplicateGroups > 0;
+      var statusBadge = hasDups
+        ? '<span class="badge-dup">'+r.duplicateGroups+' set'+(r.duplicateGroups===1?"":"s")+'</span>'
+        : '<span class="badge-clean">Clean</span>';
+      var expandIcon = hasDups ? '<span class="adv-expand-icon" id="expand-icon-'+idx+'">&#9654;</span>' : '';
+
+      html+='<tr class="adv-row" data-idx="'+idx+'">'
+        +'<td>'+expandIcon+esc(r.company)+'</td>'
+        +'<td style="font-family:var(--mono);font-size:12px">—</td>'
+        +'<td>'+r.totalFetched+'</td>'
+        +'<td>'+(hasDups?r.duplicateGroups:'0')+'</td>'
+        +'<td>'+(hasDups?r.duplicateRecords:'0')+'</td>'
+        +'<td>'+statusBadge+'</td></tr>';
+
+      // Expandable detail row (hidden by default)
+      if(hasDups){
+        html+='<tr class="adv-detail-row" id="detail-row-'+idx+'"><td class="adv-detail-cell" colspan="6">';
+        r.groups.forEach(function(g, gi){
+          var first = g.members[0];
+          var keyText = first.email!=="(no email)" ? first.email : (first.name||"(no name)");
+          html+='<div class="cluster"><div class="cluster-head"><span class="key">'+esc(keyText)
+            +'</span><span class="badge">'+g.size+' matches</span></div>';
+          html+='<table><thead><tr><th>Name</th><th>Email</th><th>Bullhorn ID</th><th>In Shazamme</th></tr></thead><tbody>';
+          g.members.forEach(function(m){
+            var nm=m.name==="(no name)"?'<span class="empty">(no name)</span>':esc(m.name);
+            var em=m.email==="(no email)"?'<span class="empty">(no email)</span>':esc(m.email);
+            var shaz=m.existsInShazamme===true?'<span class="tag yes">Yes</span>'
+              :m.existsInShazamme===false?'<span class="tag no">No (false alarm)</span>'
+              :'<span class="tag unknown">N/A</span>';
+            html+='<tr class="candidate-row" data-cid="'+m.id+'" data-advid="'+r.advertiserId+'" style="cursor:pointer">'
+              +'<td>'+nm+'</td><td class="email">'+em+'</td><td class="id">'+esc(m.id)+'</td><td>'+shaz+'</td></tr>';
+          });
+          html+='</tbody></table></div>';
+        });
+        html+='</td></tr>';
+      }
+    });
+
+    html+='</tbody></table>';
+    $("report-results").innerHTML = html;
+
+    // Attach expand/collapse handlers
+    document.querySelectorAll(".adv-row[data-idx]").forEach(function(row){
+      row.addEventListener("click", function(){
+        var idx = this.getAttribute("data-idx");
+        var detailRow = $("detail-row-"+idx);
+        var icon = $("expand-icon-"+idx);
+        if(!detailRow) return;
+        detailRow.classList.toggle("open");
+        if(icon) icon.classList.toggle("open");
+      });
+    });
+
+    // Attach candidate click handlers for slide-out
+    document.querySelectorAll(".candidate-row").forEach(function(row){
+      row.addEventListener("click", function(e){
+        e.stopPropagation();
+        var cid = this.getAttribute("data-cid");
+        var advId = this.getAttribute("data-advid");
+        openCandidateDetail(cid, advId);
+      });
+    });
+  }
+
+  // ---- Export All CSV ----
+  $("export-all-csv").addEventListener("click", function(){
+    var rows=[["company","duplicate_set","candidate_name","email","bullhorn_id","exists_in_shazamme"]];
+    reportData.forEach(function(r){
+      if(r.type==="error"||!r.groups) return;
+      r.groups.forEach(function(g,i){
+        g.members.forEach(function(m){
+          var shaz=m.existsInShazamme===true?"Yes":m.existsInShazamme===false?"No":"N/A";
+          rows.push([r.company,"set_"+(i+1),m.name==="(no name)"?"":m.name,m.email==="(no email)"?"":m.email,m.id,shaz]);
+        });
+      });
+    });
+    var csv=rows.map(function(row){
+      return row.map(function(cell){
+        var s=String(cell==null?"":cell);
+        return /[",\n]/.test(s)?'"'+s.replace(/"/g,'""')+'"':s;
+      }).join(",");
+    }).join("\n");
+    var blob=new Blob([csv],{type:"text/csv"});
+    var a=document.createElement("a");
+    var dateLabel=$("report-date-label").textContent||"report";
+    a.href=URL.createObjectURL(blob);
+    a.download="duplicate_report_"+dateLabel+".csv";
+    a.click();
+    URL.revokeObjectURL(a.href);
+  });
+
+  // ==================================================================
+  //  Slide-out candidate detail panel
+  // ==================================================================
+  function openCandidateDetail(candidateId, advertiserId){
+    $("slide-content").innerHTML='<div class="slide-loading">Loading candidate details...</div>';
+    $("slide-overlay").classList.add("open");
+    $("slide-panel").classList.add("open");
+
+    fetch("/api/candidate/"+candidateId+"?advertiserId="+advertiserId)
+    .then(function(r){return r.json()})
+    .then(function(data){
+      if(data.error){
+        $("slide-content").innerHTML='<div class="msg err">'+esc(data.error)+'</div>';
+        return;
+      }
+      var html='<h3>'+esc(data.firstName||"")+' '+esc(data.lastName||"")+'</h3>';
+      html+='<div style="font-family:var(--mono);font-size:12px;color:var(--muted);margin-bottom:16px">Bullhorn ID: '+esc(data.id)+'</div>';
+
+      // Contact
+      html+='<div class="detail-section"><h4>Contact</h4>';
+      html+=detailRow("Email", data.email);
+      html+=detailRow("Email 2", data.email2);
+      html+=detailRow("Phone", data.phone);
+      html+=detailRow("Mobile", data.mobile);
+      html+='</div>';
+
+      // Location
+      html+='<div class="detail-section"><h4>Location</h4>';
+      html+=detailRow("Address", data._address);
+      html+='</div>';
+
+      // Professional
+      html+='<div class="detail-section"><h4>Professional</h4>';
+      html+=detailRow("Occupation", data.occupation);
+      html+=detailRow("Preference", data.employmentPreference);
+      html+=detailRow("Education", data.educationDegree);
+      html+='</div>';
+
+      // Source & Ownership
+      html+='<div class="detail-section"><h4>Source &amp; Ownership</h4>';
+      html+=detailRow("Source", data.source);
+      html+=detailRow("Owner", data._owner);
+      html+=detailRow("Date Added", data.dateAdded_fmt);
+      html+=detailRow("Last Modified", data.dateLastModified_fmt);
+      html+='</div>';
+
+      // Status
+      html+='<div class="detail-section"><h4>Status</h4>';
+      html+=detailRow("Status", data.status);
+      html+='</div>';
+
+      $("slide-content").innerHTML=html;
+    })
+    .catch(function(e){
+      $("slide-content").innerHTML='<div class="msg err">'+esc(e.message)+'</div>';
+    });
+  }
+
+  function detailRow(label,value){
+    var v = value;
+    if(Array.isArray(v)) v = v.join(", ");
+    else if(v && typeof v==="object") v = JSON.stringify(v);
+    return '<div class="detail-row"><span class="dl">'+esc(label)+'</span><span class="dv">'+esc(v||"—")+'</span></div>';
+  }
+
+  function closeCandidateDetail(){
+    $("slide-overlay").classList.remove("open");
+    $("slide-panel").classList.remove("open");
+  }
+  $("slide-close").addEventListener("click", closeCandidateDetail);
+  $("slide-overlay").addEventListener("click", closeCandidateDetail);
 
   // ---- Init ----
   loadMssqlDropdown();
