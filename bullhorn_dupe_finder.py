@@ -1236,7 +1236,7 @@ INDEX_HTML = r"""<!doctype html>
         </select>
       </div>
       <button id="run-all-btn">Run All Report</button>
-      <button id="view-report-btn" style="display:none;background:#fff;color:#33414f;border:1px solid var(--line)">View Last Report</button>
+      <button id="view-report-btn" style="display:none;background:#fff;color:#33414f;border:1px solid var(--line)">View Last Report (<span id="view-report-date"></span>)</button>
     </div>
 
     <!-- MAIN LAYOUT -->
@@ -1421,8 +1421,11 @@ INDEX_HTML = r"""<!doctype html>
         +'<option value="either">Email or name</option></select></div>';
       html+='<div><label for="f-count">Page size</label><input id="f-count" type="number" min="1" max="500" value="500"></div>';
       html+='<div><button class="action primary" id="find-btn">Find Duplicates</button></div>';
-      var hasCache = !!advResultCache[id];
-      html+='<div>'+(hasCache?'<button class="action" id="view-adv-report-btn">View Report</button>':'')+'</div>';
+      var cachedResult = advResultCache[String(id)];
+      var hasCache = !!cachedResult;
+      if(hasCache){
+        html+='<div><button class="action" id="view-adv-report-btn">View Report ('+esc(cachedResult.date||"")+')</button></div>';
+      }
       html+='</div>';
       html+='<div id="find-status"></div>';
       html+='<div id="results"></div>';
@@ -1444,7 +1447,7 @@ INDEX_HTML = r"""<!doctype html>
       if(viewBtn){
         viewBtn.addEventListener("click",function(){
           $("find-status").innerHTML="";
-          renderResults(advResultCache[id]);
+          renderResults(advResultCache[String(id)]);
         });
       }
     });
@@ -1509,7 +1512,7 @@ INDEX_HTML = r"""<!doctype html>
         .then(function(result){
           if(result.error){$("find-status").innerHTML='<div class="msg err">'+esc(result.error)+'</div>';return;}
           $("find-status").innerHTML="";
-          advResultCache[advId]=result;
+          advResultCache[String(advId)]=result;
           saveAdvCache();
           renderResults(result);
           // Show "View Report" button if not already present
@@ -1517,11 +1520,11 @@ INDEX_HTML = r"""<!doctype html>
             var findForm=document.querySelector(".find-form");
             if(findForm){
               var d=document.createElement("div");
-              d.innerHTML='<button class="action" id="view-adv-report-btn">View Report</button>';
+              d.innerHTML='<button class="action" id="view-adv-report-btn">View Report ('+esc(result.date||"")+')</button>';
               findForm.appendChild(d);
               $("view-adv-report-btn").addEventListener("click",function(){
                 $("find-status").innerHTML="";
-                renderResults(advResultCache[advId]);
+                renderResults(advResultCache[String(advId)]);
               });
             }
           }
@@ -1739,9 +1742,11 @@ INDEX_HTML = r"""<!doctype html>
 
     // Show export button and "View Last Report" button
     if(reportData.length > 0){
+      var rDate = $("report-date-label").textContent || "";
       $("export-all-csv").style.display = "inline-block";
+      $("view-report-date").textContent = rDate;
       $("view-report-btn").style.display = "inline-block";
-      saveReportData($("report-date-label").textContent || "");
+      saveReportData(rDate);
     }
 
     // Build the advertiser results table
@@ -1928,6 +1933,7 @@ INDEX_HTML = r"""<!doctype html>
 
   // Restore "View Last Report" button if cached report exists
   if(reportData.length > 0 && reportDateSaved){
+    $("view-report-date").textContent = reportDateSaved;
     $("view-report-btn").style.display = "inline-block";
   }
 })();
