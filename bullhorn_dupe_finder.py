@@ -246,25 +246,13 @@ def _check_exists_in_shazamme(candidates: list) -> dict:
         bh_id = str(c.get("id", "")).strip()
         email = (c.get("email") or "").strip().lower()
 
-        if bh_id:
+        if bh_id and email:
             cur.execute(
-                "SELECT COUNT(*) FROM dbo.Candidate WHERE BullhornCandidateID = %s",
-                (bh_id,),
+                "SELECT COUNT(1) FROM dbo.Candidate c WHERE c.EMail = %s AND c.BullhornCandidateID = %s",
+                (email, bh_id),
             )
             count = cur.fetchone()[0]
-            if count > 0:
-                result[bh_id] = True
-                continue
-            # Fallback: check by email if BH ID not found
-            if email:
-                cur.execute(
-                    "SELECT COUNT(*) FROM dbo.Candidate WHERE EMail = %s",
-                    (email,),
-                )
-                count = cur.fetchone()[0]
-                result[bh_id] = count > 0
-            else:
-                result[bh_id] = False
+            result[bh_id] = count > 0
         else:
             result[bh_id] = False
 
