@@ -1206,7 +1206,7 @@ INDEX_HTML = r"""<!doctype html>
   <header>
     <p class="eyebrow">Shazamme / Data Quality</p>
     <h1>Candidate Duplicate Finder</h1>
-    <p class="sub">Add advertisers from Shazamme, refresh Bullhorn tokens, and find duplicate candidates by email or name.</p>
+    <p class="sub">Add advertisers from Shazamme, refresh Bullhorn tokens, and find duplicate candidates by email or name. Use "Find Duplicates" for a single advertiser, or "Run All Report" to scan all advertisers at once.</p>
   </header>
 
   <!-- ====== MAIN VIEW (advertiser management) ====== -->
@@ -1223,6 +1223,10 @@ INDEX_HTML = r"""<!doctype html>
 
     <!-- RUN ALL REPORT BAR -->
     <div class="card run-all-bar">
+      <div class="field" style="flex:0 0 auto;align-self:center">
+        <label style="margin:0;font-size:13px;font-weight:600;color:var(--ink)">Scan All Advertisers</label>
+        <span style="font-size:11px;color:var(--muted)">Refresh tokens, detect duplicates, verify in Shazamme</span>
+      </div>
       <div class="field">
         <label for="ra-date">Date</label>
         <input id="ra-date" type="date">
