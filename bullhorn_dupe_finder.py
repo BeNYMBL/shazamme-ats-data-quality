@@ -1294,7 +1294,8 @@ INDEX_HTML = r"""<!doctype html>
 (function(){
   var $ = function(id){ return document.getElementById(id); };
   var selectedAdvId = null;
-  var advResultCache = {};  // advertiserId -> last duplicate report result
+  var advResultCache = JSON.parse(localStorage.getItem("advResultCache")||"{}");
+  function saveAdvCache(){ localStorage.setItem("advResultCache",JSON.stringify(advResultCache)); }
 
   function esc(s){
     return String(s==null?"":s).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
@@ -1509,6 +1510,7 @@ INDEX_HTML = r"""<!doctype html>
           if(result.error){$("find-status").innerHTML='<div class="msg err">'+esc(result.error)+'</div>';return;}
           $("find-status").innerHTML="";
           advResultCache[advId]=result;
+          saveAdvCache();
           renderResults(result);
           // Show "View Report" button if not already present
           if(!$("view-adv-report-btn")){
@@ -1604,7 +1606,10 @@ INDEX_HTML = r"""<!doctype html>
   // ==================================================================
   //  Run All Report — streaming, progress, expandable table, slide-out
   // ==================================================================
-  var reportData = [];  // collected results from streaming
+  var _savedReport = JSON.parse(localStorage.getItem("reportData")||"null");
+  var reportData = _savedReport ? _savedReport.data : [];
+  var reportDateSaved = _savedReport ? _savedReport.date : "";
+  function saveReportData(date){ localStorage.setItem("reportData",JSON.stringify({data:reportData,date:date})); }
 
   function switchView(view){
     $("main-view").style.display = view==="main"?"block":"none";
@@ -1615,7 +1620,17 @@ INDEX_HTML = r"""<!doctype html>
   $("back-btn").addEventListener("click",function(){ switchView("main"); });
 
   // ---- View Last Report button ----
-  $("view-report-btn").addEventListener("click",function(){ switchView("report"); });
+  $("view-report-btn").addEventListener("click",function(){
+    // If report view is empty (page was refreshed), rebuild it from cache
+    if(reportData.length > 0 && !$("report-results").innerHTML.trim()){
+      var date = reportDateSaved || "";
+      $("report-date-label").textContent = date;
+      $("progress-section").style.display = "none";
+      $("export-all-csv").style.display = "inline-block";
+      onStreamComplete();
+    }
+    switchView("report");
+  });
 
   // ---- Set default date on the run-all bar ----
   $("ra-date").value = todayISO();
@@ -1726,6 +1741,7 @@ INDEX_HTML = r"""<!doctype html>
     if(reportData.length > 0){
       $("export-all-csv").style.display = "inline-block";
       $("view-report-btn").style.display = "inline-block";
+      saveReportData($("report-date-label").textContent || "");
     }
 
     // Build the advertiser results table
@@ -1909,6 +1925,11 @@ INDEX_HTML = r"""<!doctype html>
   // ---- Init ----
   loadMssqlDropdown();
   loadAdvList();
+
+  // Restore "View Last Report" button if cached report exists
+  if(reportData.length > 0 && reportDateSaved){
+    $("view-report-btn").style.display = "inline-block";
+  }
 })();
 </script>
 </body>
