@@ -196,6 +196,19 @@ def list_pg_advertisers():
     return rows
 
 
+def delete_pg_advertiser(adv_id: int):
+    """Delete an advertiser and its candidates from PostgreSQL."""
+    conn = get_pg()
+    cur = conn.cursor()
+    cur.execute('DELETE FROM "Candidate" WHERE "AdvertiserId" = %s', (adv_id,))
+    cur.execute('DELETE FROM "Advertiser" WHERE "Id" = %s', (adv_id,))
+    conn.commit()
+    deleted = cur.rowcount
+    cur.close()
+    conn.close()
+    return deleted > 0
+
+
 def get_pg_advertiser(adv_id: int):
     """Get a single advertiser by PK from PostgreSQL."""
     conn = get_pg()
@@ -777,6 +790,21 @@ class Handler(BaseHTTPRequestHandler):
         else:
             self._send(404, "Not found", "text/plain; charset=utf-8")
 
+    def do_DELETE(self):
+        path = self.path.split("?")[0]
+        if re.match(r"^/api/advertisers/\d+$", path):
+            adv_id = int(path.split("/")[-1])
+            try:
+                deleted = delete_pg_advertiser(adv_id)
+                if deleted:
+                    self._json_ok({"success": True})
+                else:
+                    self._json_err("Advertiser not found.")
+            except Exception as e:
+                self._json_err(f"Error: {e}")
+        else:
+            self._send(404, "Not found", "text/plain; charset=utf-8")
+
     def do_POST(self):
         path = self.path.split("?")[0]
         try:
@@ -962,7 +990,16 @@ INDEX_HTML = r"""<!doctype html>
     padding:10px 12px; cursor:pointer; border-radius:8px;
     font-size:13px; margin-bottom:4px; border:1px solid transparent;
     transition:background .1s, border-color .1s;
+    display:flex; align-items:center; justify-content:space-between;
   }
+  .adv-list li .adv-name{flex:1; overflow:hidden; text-overflow:ellipsis}
+  .adv-delete{
+    background:none; border:0; color:var(--muted); cursor:pointer;
+    font-size:14px; padding:2px 6px; border-radius:4px; flex-shrink:0;
+    opacity:0; transition:opacity .15s, color .15s;
+  }
+  .adv-list li:hover .adv-delete{opacity:1}
+  .adv-delete:hover{color:var(--danger)}
   .adv-list li:hover{background:var(--accent-soft)}
   .adv-list li.active{background:var(--accent-soft); border-color:var(--accent); font-weight:600}
   .adv-list .empty-msg{color:var(--muted); font-size:12px; font-style:italic; padding:12px}
@@ -1199,6 +1236,7 @@ INDEX_HTML = r"""<!doctype html>
         </select>
       </div>
       <button id="run-all-btn">Run All Report</button>
+      <button id="view-report-btn" style="display:none;background:#fff;color:#33414f;border:1px solid var(--line)">View Last Report</button>
     </div>
 
     <!-- MAIN LAYOUT -->
@@ -1307,16 +1345,38 @@ INDEX_HTML = r"""<!doctype html>
       var html="";
       data.forEach(function(a){
         var cls=a.Id===selectedAdvId?" active":"";
-        html+='<li class="adv-item'+cls+'" data-id="'+a.Id+'">'+esc(a.Company||"(no name)")+'</li>';
+        html+='<li class="adv-item'+cls+'" data-id="'+a.Id+'">'
+          +'<span class="adv-name">'+esc(a.Company||"(no name)")+'</span>'
+          +'<button class="adv-delete" data-id="'+a.Id+'" title="Remove advertiser">&times;</button>'
+          +'</li>';
       });
       $("adv-list").innerHTML=html;
       // attach click handlers
       document.querySelectorAll(".adv-item").forEach(function(li){
-        li.addEventListener("click",function(){
+        li.addEventListener("click",function(e){
+          if(e.target.classList.contains("adv-delete")) return;
           selectedAdvId=parseInt(this.getAttribute("data-id"));
           document.querySelectorAll(".adv-item").forEach(function(el){el.classList.remove("active")});
           this.classList.add("active");
           loadAdvDetail(selectedAdvId);
+        });
+      });
+      // attach delete handlers
+      document.querySelectorAll(".adv-delete").forEach(function(btn){
+        btn.addEventListener("click",function(e){
+          e.stopPropagation();
+          var id=parseInt(this.getAttribute("data-id"));
+          if(!confirm("Remove this advertiser from monitoring?")) return;
+          fetch("/api/advertisers/"+id,{method:"DELETE"})
+          .then(function(r){return r.json()})
+          .then(function(data){
+            if(data.error){alert(data.error);return;}
+            if(selectedAdvId===id){
+              selectedAdvId=null;
+              $("right-panel").innerHTML='<div class="placeholder">Select an advertiser from the list to view details.</div>';
+            }
+            loadAdvList();
+          });
         });
       });
     });
@@ -1528,6 +1588,9 @@ INDEX_HTML = r"""<!doctype html>
   // ---- Back button ----
   $("back-btn").addEventListener("click",function(){ switchView("main"); });
 
+  // ---- View Last Report button ----
+  $("view-report-btn").addEventListener("click",function(){ switchView("report"); });
+
   // ---- Set default date on the run-all bar ----
   $("ra-date").value = todayISO();
 
@@ -1633,8 +1696,11 @@ INDEX_HTML = r"""<!doctype html>
       +'<div class="stat '+(failedCount?'flag':'')+'"><div class="n">'+failedCount+'</div><div class="l">Failed</div></div>';
     sh.style.display = "grid";
 
-    // Show export button
-    if(reportData.length > 0) $("export-all-csv").style.display = "inline-block";
+    // Show export button and "View Last Report" button
+    if(reportData.length > 0){
+      $("export-all-csv").style.display = "inline-block";
+      $("view-report-btn").style.display = "inline-block";
+    }
 
     // Build the advertiser results table
     renderReportTable();
