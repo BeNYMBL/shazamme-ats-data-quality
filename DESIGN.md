@@ -56,7 +56,7 @@ Browser (localhost)          Python HTTP Server
 
 | Detail | Value |
 |--------|-------|
-| Host | `shazamme-db-prod.c2co6ncidqsp.us-east-1.rds.amazonaws.com` |
+| Host | *(see .env file)* |
 | Port | 1433 |
 | Database | `Shazamme` |
 | Driver | `pymssql` |
@@ -65,7 +65,7 @@ Browser (localhost)          Python HTTP Server
 
 **`dbo.Advertiser`** — source of advertiser/client configuration. ~188 validated Bullhorn advertisers.
 
-**`dbo.ExternalSystem`** — lookup table for integration type. Bullhorn's `ExternalSystemID` = `7fe50749-e1b2-4cc7-970f-a6b4de0066e4`.
+**`dbo.ExternalSystem`** — lookup table for integration type. Filtered by `ExternalSystem = 'Bullhorn'`.
 
 **Filter criteria for dropdown:**
 ```sql
@@ -83,7 +83,7 @@ ORDER BY a.Company
 
 | Detail | Value |
 |--------|-------|
-| Host | `vysta-process-db.c2co6ncidqsp.us-east-1.rds.amazonaws.com` |
+| Host | *(see .env file)* |
 | Port | 5432 |
 | Database | `Shazamme_DataQuality` |
 | Driver | `psycopg2` |
@@ -176,8 +176,8 @@ If either email or BullhornCandidateID is missing from the Bullhorn record, `Exi
 1. User selects a date and match mode in the **Run All Report** bar, then clicks the button.
 2. The UI switches to a full-width **Report View** with a progress bar and live feed.
 3. Server streams NDJSON (newline-delimited JSON) — one event per line:
-   - `{"type":"progress", "current":1, "total":12, "company":"Skillhouse"}` — progress update
-   - `{"type":"result", "advertiserId":2, "company":"Skillhouse", ...}` — advertiser result with duplicate data
+   - `{"type":"progress", "current":1, "total":12, "company":"Example Corp"}` — progress update
+   - `{"type":"result", "advertiserId":2, "company":"Example Corp", ...}` — advertiser result with duplicate data
    - `{"type":"error", "advertiserId":5, "company":"BrokenCo", "error":"..."}` — if token refresh or API call fails
    - `{"type":"complete"}` — stream is done
 4. For each advertiser the server: refreshes the Bullhorn token → fetches candidates → runs duplicate detection → verifies against Shazamme → streams the result.
@@ -226,8 +226,8 @@ The UI has two views that swap in place:
 ┌─────────────────────────────────────────────────────────────────┐
 │  [← Back]    Duplicate Report — 2026-07-17        [Export CSV]  │
 ├─────────────────────────────────────────────────────────────────┤
-│  ████████████████░░░░░░░  75%  Processing 9 of 12: Acme Corp   │
-│  ✓ Skillhouse — 150 candidates, 3 duplicate sets                │
+│  ████████████████░░░░░░░  75%  Processing 9 of 12: Acme Staffing│
+│  ✓ Example Corp — 150 candidates, 3 duplicate sets              │
 │  ✓ TechHire — 80 candidates, 0 duplicate sets                   │
 │  ✗ BrokenCo — Failed: token refresh error                       │
 ├─────────────────────────────────────────────────────────────────┤
@@ -237,20 +237,20 @@ The UI has two views that swap in place:
 │  └──────┘ └──────┘ └──────┘ └───────┘                          │
 ├─────────────────────────────────────────────────────────────────┤
 │  Advertiser      │ Candidates │ Dup Sets │ Dup Recs │ Status    │
-│  ▼ Skillhouse    │    150     │    3     │    7     │ 3 sets    │
-│    ┌─ Set 1: hafizh.adip@gmail.com ─────────────────────────┐  │
-│    │ Hafizh Prasetya   2444591  ← clickable → slide-out     │  │
-│    │ Hafizh Adi P.     2444724                              │  │
+│  ▼ Example Corp  │    150     │    3     │    7     │ 3 sets    │
+│    ┌─ Set 1: jane.doe@example.com ──────────────────────────┐  │
+│    │ Jane Doe          1000001  ← clickable → slide-out     │  │
+│    │ Jane M. Doe       1000002                              │  │
 │    └────────────────────────────────────────────────────────┘  │
-│  ► Acme Corp     │     80     │    0     │    0     │ Clean     │
+│  ► Acme Staffing │     80     │    0     │    0     │ Clean     │
 │  ⚠ BrokenCo      │     —      │    —     │    —     │ Failed    │
 └─────────────────────────────────────────────────────────────────┘
 
 Slide-out panel (on candidate click):
 ┌───────────────────────┐
 │  × Close              │
-│  Hafizh Adi Prasetya  │
-│  Bullhorn ID: 2444724 │
+│  Jane M. Doe          │
+│  Bullhorn ID: 1000002 │
 │                       │
 │  CONTACT              │
 │  Email / Phone / etc  │
@@ -309,8 +309,8 @@ Slide-out panel (on candidate click):
 Queries MSSQL for validated Bullhorn advertisers. Returns:
 ```json
 [
-  { "AdvertiserID": "735cad2e-...", "Company": "Empresaria Group PLC" },
-  { "AdvertiserID": "8d6d23d4-...", "Company": "GECO Internal" }
+  { "AdvertiserID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee", "Company": "Example Corp" },
+  { "AdvertiserID": "11111111-2222-3333-4444-555555555555", "Company": "Acme Staffing" }
 ]
 ```
 
@@ -320,12 +320,12 @@ Copies an advertiser from MSSQL into PostgreSQL.
 
 **Request body:**
 ```json
-{ "AdvertiserID": "735cad2e-6390-4aa1-a604-0032e122e4b8" }
+{ "AdvertiserID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee" }
 ```
 
 **Response:**
 ```json
-{ "success": true, "Company": "Empresaria Group PLC" }
+{ "success": true, "Company": "Example Corp" }
 ```
 
 ### GET /api/advertisers
@@ -335,9 +335,9 @@ Returns all advertisers stored in PostgreSQL.
 [
   {
     "Id": 1,
-    "AdvertiserID": "735cad2e-...",
-    "Company": "Empresaria Group PLC",
-    "BullhornSwimlane": "rest22"
+    "AdvertiserID": "aaaaaaaa-bbbb-cccc-dddd-eeeeeeeeeeee",
+    "Company": "Example Corp",
+    "BullhornSwimlane": "rest99"
   }
 ]
 ```
@@ -369,9 +369,9 @@ Runs the duplicate report across **all** advertisers in PostgreSQL. Streams resu
 
 **Streamed response** (Content-Type: `application/x-ndjson`):
 ```
-{"type":"progress","current":1,"total":12,"company":"Skillhouse"}
-{"type":"result","advertiserId":2,"company":"Skillhouse","totalFetched":150,"duplicateGroups":3,...}
-{"type":"progress","current":2,"total":12,"company":"Acme Corp"}
+{"type":"progress","current":1,"total":12,"company":"Example Corp"}
+{"type":"result","advertiserId":2,"company":"Example Corp","totalFetched":150,"duplicateGroups":3,...}
+{"type":"progress","current":2,"total":12,"company":"Acme Staffing"}
 {"type":"error","advertiserId":5,"company":"BrokenCo","error":"token refresh failed"}
 {"type":"complete"}
 ```

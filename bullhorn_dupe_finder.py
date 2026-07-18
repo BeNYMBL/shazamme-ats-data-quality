@@ -454,9 +454,9 @@ def _bh_get_rest_token(access_token: str) -> dict:
 def _parse_rest_url(rest_url: str) -> tuple:
     """Extract swimlane and corp token from a Bullhorn restUrl."""
     parsed = urlparse(rest_url)
-    # Swimlane = first part of hostname (e.g., "rest22" from "rest22.bullhornstaffing.com")
+    # Swimlane = first part of hostname (e.g., "restNN" from "restNN.bullhornstaffing.com")
     swimlane = parsed.hostname.split(".")[0] if parsed.hostname else ""
-    # Corp token = second path segment (e.g., "5ac5s0" from "/rest-services/5ac5s0/")
+    # Corp token = second path segment (e.g., "abc123" from "/rest-services/abc123/")
     parts = [p for p in parsed.path.split("/") if p]
     corp_token = parts[1] if len(parts) > 1 else ""
     return swimlane, corp_token
