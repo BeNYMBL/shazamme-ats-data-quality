@@ -299,6 +299,7 @@ Slide-out panel (on candidate click):
 | `GET` | `/api/advertisers` | List all advertisers from PostgreSQL (for left panel) |
 | `POST` | `/api/advertisers` | Add an advertiser (copy from MSSQL to PostgreSQL) |
 | `GET` | `/api/advertisers/<id>` | Get single advertiser details from PostgreSQL |
+| `DELETE` | `/api/advertisers/<id>` | Remove an advertiser and its candidates from PostgreSQL |
 | `POST` | `/api/advertisers/<id>/refresh-token` | Refresh Bullhorn OAuth token for an advertiser |
 | `POST` | `/api/find` | Run duplicate report for a single advertiser |
 | `POST` | `/api/report/all` | **NEW** — Run duplicate report across all advertisers (streams NDJSON) |

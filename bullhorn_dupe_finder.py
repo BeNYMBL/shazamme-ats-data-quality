@@ -1,30 +1,26 @@
 #!/usr/bin/env python3
 """
-Bullhorn Candidate Duplicate Finder
-===================================
-A lightweight, single-file, ZERO-dependency local app.
+Shazamme ATS Data Quality Tool
+===============================
+A single-file local web app for finding duplicate candidates in Bullhorn
+and verifying whether they were created by Shazamme.
+
+Dependencies: psycopg2-binary, pymssql, python-dotenv
 
 What it does
 ------------
-1. Serves a small web UI (neat input fields, nothing is stored).
-2. Takes your Bullhorn REST base URL, BhRestToken, and a date.
-3. Calls /search/Candidate for candidates whose dateAdded falls on that day.
-4. Follows pagination until every candidate for the day is retrieved.
-5. Groups candidates that look like duplicates and reports
-   name, email, and Bullhorn candidate id for each duplicate set.
-
-Why a tiny Python server instead of a plain .html file?
--------------------------------------------------------
-Browsers block cross-origin calls to bullhornstaffing.com (CORS), so a
-pure client-side page cannot call the API. This server acts as a local
-proxy: the browser talks to localhost, and localhost talks to Bullhorn.
-Your token never leaves your machine and is never written to disk.
+1. Serves a web UI on localhost.
+2. Connects to Shazamme MSSQL (read-only) and a PostgreSQL working database.
+3. Manages Bullhorn advertiser credentials and OAuth token refresh.
+4. Finds duplicate candidates by email/name for a given date.
+5. Verifies each duplicate against the Shazamme database.
+6. Supports single-advertiser and all-advertiser (Run All) reports.
 
 Run it
 ------
-    python3 bullhorn_dupe_finder.py
+    python bullhorn_dupe_finder.py
 Then open http://localhost:8000 in your browser.
-(Optional: `python3 bullhorn_dupe_finder.py 9001` to use a different port.)
+(Optional: `python bullhorn_dupe_finder.py 9001` to use a different port.)
 """
 
 import os
@@ -251,7 +247,7 @@ def update_pg_advertiser_tokens(adv_id: int, session_token: str, rest_url: str,
 def _check_exists_in_shazamme(candidates: list) -> dict:
     """Check which candidates exist in MSSQL dbo.Candidate.
     Returns a dict of BullhornCandidateID -> True/False.
-    Matches by BullhornCandidateId. If BullhornCandidateId is empty, falls back to Email.
+    A candidate is considered to exist only if BOTH EMail AND BullhornCandidateID match.
     """
     if not candidates:
         return {}
@@ -1760,12 +1756,12 @@ INDEX_HTML = r"""<!doctype html>
 
   function renderReportTable(){
     var html = '<table class="report-table"><thead><tr>'
-      +'<th>Advertiser</th><th>Swimlane</th><th>Candidates</th><th>Dup Sets</th><th>Dup Records</th><th>Status</th>'
+      +'<th>Advertiser</th><th>Candidates</th><th>Dup Sets</th><th>Dup Records</th><th>Status</th>'
       +'</tr></thead><tbody>';
 
     reportData.forEach(function(r, idx){
       if(r.type==="error"){
-        html+='<tr class="adv-row"><td>'+esc(r.company)+'</td><td>—</td><td>—</td><td>—</td><td>—</td>'
+        html+='<tr class="adv-row"><td>'+esc(r.company)+'</td><td>—</td><td>—</td><td>—</td>'
           +'<td><span class="badge-fail" title="'+esc(r.error)+'">Failed</span></td></tr>';
         return;
       }
@@ -1777,7 +1773,6 @@ INDEX_HTML = r"""<!doctype html>
 
       html+='<tr class="adv-row" data-idx="'+idx+'">'
         +'<td>'+expandIcon+esc(r.company)+'</td>'
-        +'<td style="font-family:var(--mono);font-size:12px">—</td>'
         +'<td>'+r.totalFetched+'</td>'
         +'<td>'+(hasDups?r.duplicateGroups:'0')+'</td>'
         +'<td>'+(hasDups?r.duplicateRecords:'0')+'</td>'
@@ -1785,7 +1780,7 @@ INDEX_HTML = r"""<!doctype html>
 
       // Expandable detail row (hidden by default)
       if(hasDups){
-        html+='<tr class="adv-detail-row" id="detail-row-'+idx+'"><td class="adv-detail-cell" colspan="6">';
+        html+='<tr class="adv-detail-row" id="detail-row-'+idx+'"><td class="adv-detail-cell" colspan="5">';
         r.groups.forEach(function(g, gi){
           var first = g.members[0];
           var keyText = first.email!=="(no email)" ? first.email : (first.name||"(no name)");
